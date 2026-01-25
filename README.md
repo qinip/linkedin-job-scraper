@@ -4,6 +4,8 @@
 
 A simple userscript to scrape job listings from LinkedIn job pages.
 
+![Screenshot](screenshot.png)
+
 ## Supported Pages
 
 - Recommended jobs (`/jobs/collections/recommended/`)

@@ -4,6 +4,8 @@
 
 一个简单的用户脚本，用于从 LinkedIn 职位页面抓取职位信息。
 
+![截图](screenshot.png)
+
 ## 支持的页面
 
 - 推荐职位 (`/jobs/collections/recommended/`)
