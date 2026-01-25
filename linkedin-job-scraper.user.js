@@ -10,7 +10,7 @@
 // @run-at       document-end
 // @grant        none
 // @license      MIT
-// @homepageURL  https://github.com/qinip/linkedin-job-scraper
+// @homepageURL  https://github.com/eddyji/linkedin-job-scraper
 // ==/UserScript==
 
 (function() {
