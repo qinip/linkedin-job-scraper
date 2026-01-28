@@ -53,9 +53,8 @@
 2. 右侧会出现蓝色面板
 
 3. 点击抓取按钮：
-   - **Scrape All** - 抓取全部页面
-   - **Scrape at least N** - 抓取至少 N 个新职位
-   - **Quick Scrape** - 仅抓取当前可见职位
+   - **Quick Scrape** - 快速抓取当前已加载的职位（不滚动/翻页）
+   - **Scrape at least N** - 滚动/翻页直到抓取到 N 个新职位
 
 4. 结果会复制到剪贴板，也可下载为 JSON 文件
 

@@ -53,9 +53,8 @@ Click: [Install Script](https://raw.githubusercontent.com/qinip/linkedin-job-scr
 2. A blue panel will appear on the right side
 
 3. Click a scrape button:
-   - **Scrape All** - Scrape all pages
-   - **Scrape at least N** - Scrape until N new jobs found
-   - **Quick Scrape** - Scrape currently visible jobs only
+   - **Quick Scrape** - Scrape currently loaded jobs (no scrolling/pagination)
+   - **Scrape at least N** - Scroll/paginate until N new jobs found
 
 4. Results are copied to clipboard and can be downloaded as JSON
 
