@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LinkedIn Job Scraper
 // @namespace    https://linkedin.com/
-// @version      0.1.1
+// @version      0.1.5
 // @description  Scrape LinkedIn jobs with accumulation, deduplication, and multi-language support. Supports both classic and new (Voyager) UI.
 // @author       Eddy Ji
 // @match        *://www.linkedin.com/jobs/*
@@ -109,7 +109,7 @@
         return LANG[lang][key] || LANG.en[key] || key;
     }
     
-    console.log('[LinkedIn Scraper v0.1.1] Script loaded!');
+    console.log('[LinkedIn Scraper v0.1.5] Script loaded!');
     
     // ========================================
     // UI Version Detection
@@ -166,12 +166,21 @@
         sessionStorage.removeItem(STORAGE_KEY);
     }
     
-    // Generate dedupe key from company + title + base location
+    // Generate fallback dedupe key from company + title + base location
     function getDedupeKey(job) {
         const company = (job.company || '').toLowerCase().trim();
         const title = (job.title || '').toLowerCase().trim();
         const baseLocation = (job.location || '').replace(/\s*\(.*?\)\s*$/, '').toLowerCase().trim();
         return `${company}|||${title}|||${baseLocation}`;
+    }
+
+    // Prefer stable LinkedIn numeric job IDs. This avoids false dedupe when
+    // new-UI company/location extraction fails and many records become "Unknown".
+    function getUniqueKey(job) {
+        const id = job && job.id != null ? String(job.id).trim() : '';
+        if (/^\d{6,}$/.test(id)) return `id:${id}`;
+        const signature = job && job.dedupeKey ? job.dedupeKey : getDedupeKey(job || {});
+        return `sig:${signature}`;
     }
     
     // Parse "X hours ago", "X days ago" etc. to number of days
@@ -191,13 +200,32 @@
     }
 
     function mergeJobs(existingJobs, newJobs) {
-        const existingKeys = new Set(existingJobs.map(j => getDedupeKey(j)));
-        const uniqueNewJobs = newJobs.filter(j => !existingKeys.has(getDedupeKey(j)));
+        const existingKeys = new Set(existingJobs.map(j => getUniqueKey(j)));
+        const uniqueNewJobs = newJobs.filter(j => !existingKeys.has(getUniqueKey(j)));
         return {
             merged: [...existingJobs, ...uniqueNewJobs],
             newCount: uniqueNewJobs.length,
             duplicateCount: newJobs.length - uniqueNewJobs.length
         };
+    }
+
+    // Merge jobs into an in-memory collection for the current run using the same dedupe key
+    function appendUniqueJobs(runJobs, runKeys, incomingJobs, accumulatedKeys) {
+        let added = 0;
+        let trulyNewAdded = 0;
+
+        for (const job of incomingJobs) {
+            const key = getUniqueKey(job);
+            if (runKeys.has(key)) continue;
+            runKeys.add(key);
+            runJobs.push(job);
+            added++;
+            if (!accumulatedKeys || !accumulatedKeys.has(key)) {
+                trulyNewAdded++;
+            }
+        }
+
+        return { added, trulyNewAdded };
     }
     
     // Wait for page to fully load
@@ -301,7 +329,7 @@
         // Header row
         const header = createDiv({display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px'});
         const title = document.createElement('strong');
-        title.textContent = '🔍 ' + t('title') + ' v0.1.1';
+        title.textContent = '🔍 ' + t('title') + ' v0.1.5';
         title.style.fontSize = '14px';
         
         const headerBtns = createDiv({display: 'flex', gap: '8px', alignItems: 'center'});
@@ -482,7 +510,7 @@
     // New UI Extraction
     // ========================================
     
-    // Extract Job ID from data-view-tracking-scope attribute
+    // Extract Job ID (and optionally company) from data-view-tracking-scope attribute
     function extractJobIdFromTracking(element) {
         const trackingAttr = element.getAttribute('data-view-tracking-scope');
         if (!trackingAttr) return null;
@@ -507,10 +535,177 @@
         }
         return null;
     }
+
+    // Extract company name from a job card using multiple robust strategies
+    // that do NOT depend on hashed CSS class names
+    function extractCompanyRobust(card, title, location) {
+        let company = '';
+
+        // Strategy A: /company/ link text
+        // LinkedIn cards often have <a href="linkedin.com/company/SLUG">Company Name</a>
+        const companyLinks = card.querySelectorAll('a[href*="/company/"]');
+        for (const link of companyLinks) {
+            const txt = (link.textContent || '').trim();
+            if (txt && txt.length > 1 && txt.length < 80) {
+                company = txt;
+                break;
+            }
+        }
+        if (company) return company;
+
+        // Strategy B: aria-label on links that contain "company"
+        const ariaLinks = card.querySelectorAll('a[aria-label]');
+        for (const link of ariaLinks) {
+            const label = link.getAttribute('aria-label') || '';
+            // Patterns: "Company Name" or "View Company Name's profile"
+            if (/company/i.test(link.href || '') && label.length > 1 && label.length < 80) {
+                company = label.replace(/['']s?\s*company\s*page$/i, '').trim();
+                if (company) break;
+            }
+        }
+        if (company) return company;
+
+        // Strategy C: Structural DOM order — Title, Company, Location
+        // In LinkedIn job cards, <p> elements appear in order:
+        //   1st meaningful <p> = title, 2nd = company, 3rd = location
+        // We match by excluding known non-company content
+        const allPs = card.querySelectorAll('p');
+        const candidates = [];
+        for (const p of allPs) {
+            const txt = p.textContent.trim();
+            if (!txt || txt.length < 2 || txt.length > 100) continue;
+            // Skip salary, metadata, time, badges
+            if (/^\$|^\d+\s*(hour|day|week|month|year|minute)|ago$|applicant|benefit|alumni|connection|Viewed|Easy Apply|Verified|Promoted/i.test(txt)) continue;
+            candidates.push(txt);
+        }
+
+        // candidates[0] is likely title, candidates[1] company, candidates[2] location
+        if (candidates.length >= 2) {
+            // Find which candidate matches our extracted title
+            let titleIdx = -1;
+            for (let i = 0; i < candidates.length; i++) {
+                if (candidates[i] === title || title.startsWith(candidates[i]) || candidates[i].startsWith(title)) {
+                    titleIdx = i;
+                    break;
+                }
+            }
+            if (titleIdx >= 0 && titleIdx + 1 < candidates.length) {
+                const candidate = candidates[titleIdx + 1];
+                // Verify it's not the location
+                if (candidate !== location && !/\b(Remote|Hybrid|On-site|United States)\b/i.test(candidate)) {
+                    company = candidate;
+                }
+            } else if (candidates.length >= 3 && !title) {
+                // No title match found, just use position 1
+                company = candidates[1];
+            }
+        }
+
+        // Strategy D: Visible text line order (title -> company -> location -> metadata)
+        if (!company) {
+            const lines = getCardTextLines(card);
+            let titleIdx = -1;
+
+            for (let i = 0; i < lines.length; i++) {
+                const line = lines[i];
+                if (!line) continue;
+                if (title && (line === title || line.startsWith(title) || title.startsWith(line))) {
+                    titleIdx = i;
+                    break;
+                }
+            }
+
+            const start = titleIdx >= 0 ? titleIdx + 1 : 0;
+            for (let i = start; i < lines.length; i++) {
+                const line = lines[i];
+                if (!line || line.length < 2 || line.length > 100) continue;
+                if (title && (line === title || line.startsWith(title) || title.startsWith(line))) continue;
+                if (line === location) continue;
+                if (isMetadataLine(line)) continue;
+                if (looksLikeLocationLine(line)) continue;
+                company = line;
+                break;
+            }
+        }
+
+        return company;
+    }
+
+    function getCardTextLines(card) {
+        const raw = (card.innerText || card.textContent || '')
+            .split('\n')
+            .map(s => s.replace(/\s+/g, ' ').trim())
+            .filter(Boolean);
+
+        // Preserve order, remove exact duplicates
+        const lines = [];
+        const seen = new Set();
+        for (const line of raw) {
+            if (seen.has(line)) continue;
+            seen.add(line);
+            lines.push(line);
+        }
+        return lines;
+    }
+
+    function looksLikeLocationLine(line) {
+        if (!line) return false;
+        return /\b(Remote|Hybrid|On-site|United States|[A-Z][a-z]+,\s*[A-Z]{2})(\b|\s*\()/.test(line);
+    }
+
+    function isMetadataLine(line) {
+        if (!line) return true;
+        return (
+            /^\$[\d,]/.test(line) ||
+            /\b\d+\s*(minute|hour|day|week|month|year)s?\s*ago\b/i.test(line) ||
+            /\b(just now|yesterday)\b/i.test(line) ||
+            /\b(Easy Apply|Top applicant|Promoted|Viewed|Reposted)\b/i.test(line) ||
+            /\b(applicant|connection|alumni|benefit)\b/i.test(line)
+        );
+    }
+
+    function cleanTitleText(text) {
+        return (text || '')
+            .replace(/\s*\(Verified job\)\s*$/i, '')
+            .replace(/\s*Verified job\s*$/i, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
+
+    function extractTitleRobust(card) {
+        // Strategy A: direct job links are the most stable source for title
+        const linkCandidates = card.querySelectorAll('a[href*="/jobs/view/"]');
+        for (const a of linkCandidates) {
+            const txt = cleanTitleText(a.innerText || a.textContent || '');
+            if (txt && txt.length > 3 && txt.length < 180 && !isMetadataLine(txt) && !looksLikeLocationLine(txt)) {
+                return txt;
+            }
+            const aria = cleanTitleText(a.getAttribute('aria-label') || '');
+            if (aria && aria.length > 3 && aria.length < 220 && !/company/i.test(aria) && !looksLikeLocationLine(aria)) {
+                return aria;
+            }
+        }
+
+        // Strategy B: parse visible lines and take first meaningful non-metadata line
+        const lines = getCardTextLines(card);
+        for (const line of lines) {
+            const txt = cleanTitleText(line);
+            if (!txt || txt.length < 4 || txt.length > 180) continue;
+            if (isMetadataLine(txt)) continue;
+            if (looksLikeLocationLine(txt)) continue;
+            return txt;
+        }
+
+        return '';
+    }
     
     function extractJobsFromNewUI() {
         const jobs = [];
         const seen = new Set();
+        let duplicateCardCount = 0;
+        let skippedNoTitleCount = 0;
+        let skippedNoIdCount = 0;
+        let debugSkipLogged = 0;
 
         // Find job cards using the parent container with data-view-name
         const jobCardContainers = document.querySelectorAll('[data-view-name="job-search-job-card"]');
@@ -632,28 +827,22 @@
                 // ========================================
                 
                 if (!title) {
-                    // Fallback: Look for "(Verified job)" pattern
+                    // Fallback A: Look for "(Verified job)" pattern
                     const verifiedMatch = text.match(/^([^(]+?)\s*\(Verified job\)/);
                     if (verifiedMatch) {
                         title = verifiedMatch[1].trim();
                     }
                 }
 
+                if (!title) {
+                    // Fallback B: link / line-based extraction (works across class churn)
+                    title = extractTitleRobust(card);
+                }
+
                 if (!company) {
-                    // Fallback: Company is often the text right after title in the DOM
-                    // Try to find it from all <p> elements
-                    for (const p of allPs) {
-                        const txt = p.textContent.trim();
-                        const classes = p.className || '';
-                        // Company has _06170c11 but NOT _2005bf80 directly
-                        if (classes.includes('_06170c11') && !classes.includes('_2005bf80') && 
-                            txt.length > 1 && txt.length < 60 &&
-                            txt !== title && txt !== location &&
-                            !/\$|^\d+|Remote|Hybrid|On-site|United States|ago|benefit|alumni|connection|applicant|Viewed|Easy Apply/i.test(txt)) {
-                            company = txt;
-                            break;
-                        }
-                    }
+                    // Robust fallback: uses /company/ links, aria labels, and
+                    // structural DOM order — does NOT depend on hashed class names
+                    company = extractCompanyRobust(card, title, location);
                 }
 
                 if (!location) {
@@ -691,8 +880,12 @@
 
                 // Dedupe check
                 const dedupeKey = getDedupeKey({company, title, location});
-                if (seen.has(dedupeKey)) return;
-                seen.add(dedupeKey);
+                const perCardKey = jobId ? `id:${jobId}` : `sig:${dedupeKey}`;
+                if (seen.has(perCardKey)) {
+                    duplicateCardCount++;
+                    return;
+                }
+                seen.add(perCardKey);
 
                 if (title && title.length > 3) {
                     // Generate link using the real job ID if available
@@ -721,7 +914,22 @@
                     });
 
                     if (jobId) {
-                        console.log(`[LinkedIn Scraper] ✓ ${title.slice(0, 40)}... @ ${company} (ID: ${jobId})`);
+                        console.log(`[LinkedIn Scraper] ✓ ${title.slice(0, 40)}... @ ${company || 'Unknown'} (ID: ${jobId})`);
+                    }
+                    if (!company || company === 'Unknown') {
+                        console.warn(`[LinkedIn Scraper] ⚠ No company for: ${title.slice(0, 50)} (ID: ${jobId || 'none'})`);
+                    }
+                } else {
+                    if (!jobId) skippedNoIdCount++;
+                    skippedNoTitleCount++;
+                    if (debugSkipLogged < 5) {
+                        debugSkipLogged++;
+                        const lines = getCardTextLines(card).slice(0, 8);
+                        console.warn('[LinkedIn Scraper] Skipped new-ui card (no title)', {
+                            index,
+                            jobId: jobId || null,
+                            firstLines: lines
+                        });
                     }
                 }
             } catch(e) {
@@ -730,7 +938,8 @@
         });
         
         const withRealId = jobs.filter(j => !j.id.startsWith('newui-')).length;
-        console.log(`[LinkedIn Scraper] New UI: Extracted ${jobs.length} jobs (${withRealId} with real IDs)`);
+        const withCompany = jobs.filter(j => j.company && j.company !== 'Unknown').length;
+        console.log(`[LinkedIn Scraper] New UI: Extracted ${jobs.length} jobs (${withRealId} with real IDs, ${withCompany} with company name, ${duplicateCardCount} duplicate wrappers skipped, ${skippedNoTitleCount} no-title skipped, ${skippedNoIdCount} no-id among skipped)`);
         return jobs;
     }
     
@@ -742,12 +951,12 @@
         
         // New UI: Find scroll container by tracing up from a job card
         if (uiVersion === 'new') {
-            const jobCards = document.querySelectorAll('div[role="button"]');
-            const jobCard = Array.from(jobCards).find(c => 
-                c.textContent.includes('Verified job') || 
-                c.textContent.includes('/yr') || 
-                c.textContent.includes('Easy Apply')
-            );
+            const primaryCards = Array.from(document.querySelectorAll('[data-view-name="job-search-job-card"]'));
+            const fallbackCards = Array.from(document.querySelectorAll('div[role="button"]'));
+            const jobCard = primaryCards[0] || Array.from(fallbackCards).find(c => {
+                const txt = c.textContent || '';
+                return txt.includes('Verified job') || txt.includes('/yr') || txt.includes('Easy Apply') || txt.includes('applicant');
+            });
             
             if (jobCard) {
                 // Trace up to find the scrollable container (usually 3-4 levels up)
@@ -757,13 +966,16 @@
                     if (!parent || parent === document.body) break;
                     
                     const style = window.getComputedStyle(parent);
-                    const children = parent.querySelectorAll('div[role="button"]').length;
+                    const childCards = Math.max(
+                        parent.querySelectorAll('[data-view-name="job-search-job-card"]').length,
+                        parent.querySelectorAll('div[role="button"]').length
+                    );
                     
                     // Look for container with overflow:auto, multiple job cards, and scrollable
                     if ((style.overflowY === 'auto' || style.overflowY === 'scroll') && 
-                        children > 5 && 
+                        childCards > 5 && 
                         parent.scrollHeight > parent.clientHeight + 50) {
-                        console.log(`[LinkedIn Scraper] Found new UI scroll container at level ${i}`);
+                        console.log(`[LinkedIn Scraper] Found new UI scroll container at level ${i} (cards=${childCards})`);
                         return parent;
                     }
                 }
@@ -775,9 +987,12 @@
                 const style = window.getComputedStyle(el);
                 if ((style.overflowY === 'auto' || style.overflowY === 'scroll') && 
                     el.scrollHeight > el.clientHeight + 500) {
-                    const jobCards = el.querySelectorAll('div[role="button"]').length;
+                    const jobCards = Math.max(
+                        el.querySelectorAll('[data-view-name="job-search-job-card"]').length,
+                        el.querySelectorAll('div[role="button"]').length
+                    );
                     if (jobCards > 5) {
-                        console.log('[LinkedIn Scraper] Found new UI scroll container via fallback');
+                        console.log(`[LinkedIn Scraper] Found new UI scroll container via fallback (cards=${jobCards})`);
                         return el;
                     }
                 }
@@ -807,6 +1022,9 @@
             if (el && el.scrollHeight > el.clientHeight + 50) return el;
         }
         
+        if (uiVersion === 'new') {
+            console.warn('[LinkedIn Scraper] New UI scroll container not found; will fall back to window scroll (may miss virtualized jobs)');
+        }
         return null;
     }
     
@@ -971,6 +1189,294 @@
             return extractJobsFromClassicUI();
         }
     }
+
+    function findNextPageButton() {
+        const isDisabledEl = (el) => !!el && (
+            !!el.disabled ||
+            el.getAttribute('aria-disabled') === 'true' ||
+            el.classList.contains('artdeco-button--disabled')
+        );
+
+        const getClickableTarget = (el) => {
+            if (!el) return null;
+            const clickable = el.closest('button, a, [role="button"], [tabindex]');
+            if (clickable && !isDisabledEl(clickable)) return clickable;
+            const tabindex = el.getAttribute('tabindex');
+            const role = (el.getAttribute('role') || '').toLowerCase();
+            const tag = (el.tagName || '').toLowerCase();
+            const maybeInteractive = (
+                role === 'button' ||
+                tag === 'button' ||
+                tag === 'a' ||
+                (tabindex != null && tabindex !== '-1')
+            );
+            if (maybeInteractive && !isDisabledEl(el)) return el;
+            return null;
+        };
+
+        const hasNextLabel = (el) => {
+            if (!el) return false;
+            const aria = (el.getAttribute('aria-label') || '').toLowerCase();
+            const text = ((el.innerText || el.textContent || '') + '').trim().toLowerCase();
+            return (
+                aria.includes('next') ||
+                aria.includes('下一页') ||
+                text === 'next' ||
+                text.includes(' next') ||
+                text.startsWith('next ') ||
+                text.includes('下一页')
+            );
+        };
+
+        // Classic UI selectors
+        let nextBtn = document.querySelector('.jobs-search-pagination__button--next');
+        if (nextBtn && !nextBtn.disabled) return nextBtn;
+
+        nextBtn = document.querySelector('button[aria-label="View next page"]');
+        if (nextBtn && !nextBtn.disabled) return nextBtn;
+
+        // New UI / localized fallbacks: inspect likely pagination containers first
+        const roots = Array.from(document.querySelectorAll(
+            '.jobs-search-pagination, [class*="pagination"], [data-test-pagination], [aria-label*="pagination"], [aria-label*="Pagination"], [aria-label*="页"]'
+        ));
+
+        // Additional root discovery: find containers that visibly contain page numbers + "Next"
+        const textRoots = Array.from(document.querySelectorAll('nav, div, ul')).filter(el => {
+            const txt = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+            if (!txt || txt.length > 180) return false;
+            const hasNext = /\bNext\b|下一页/i.test(txt);
+            const pageTokens = txt.match(/\b\d+\b/g) || [];
+            return hasNext && pageTokens.length >= 2;
+        });
+        for (const el of textRoots) {
+            if (!roots.includes(el)) roots.push(el);
+        }
+
+        const candidates = [];
+        for (const root of roots) {
+            root.querySelectorAll('button, [role="button"], a').forEach(el => candidates.push(el));
+            root.querySelectorAll('span, div, li').forEach(el => {
+                if (hasNextLabel(el)) candidates.push(el);
+            });
+        }
+
+        // If no pagination roots matched, fall back to all buttons/links
+        if (candidates.length === 0) {
+            document.querySelectorAll('button, [role="button"], a').forEach(el => candidates.push(el));
+        }
+
+        const seen = new Set();
+        for (const el of candidates) {
+            if (!el || seen.has(el)) continue;
+            seen.add(el);
+
+            const target = getClickableTarget(el);
+            if (!target || seen.has(target)) continue;
+            seen.add(target);
+            if (isDisabledEl(target)) continue;
+
+            const aria = (target.getAttribute('aria-label') || '').toLowerCase();
+            const text = ((target.innerText || target.textContent || '') + '').trim().toLowerCase();
+            const cls = (target.className || '').toString().toLowerCase();
+
+            const likelyPagination = cls.includes('pagination') || aria.includes('page') || text.includes('page') || text.includes('页') || roots.length > 0;
+            const looksLikeNext = hasNextLabel(target) || hasNextLabel(el);
+
+            if (looksLikeNext && likelyPagination) {
+                console.log('[LinkedIn Scraper] Found next-page control', {
+                    tag: target.tagName,
+                    text: (target.innerText || target.textContent || '').trim(),
+                    aria: target.getAttribute('aria-label') || '',
+                    className: String(target.className || '')
+                });
+                return target;
+            }
+        }
+
+        // Final fallback: any visible "Next" descendant -> clickable ancestor
+        const anyNextLike = Array.from(document.querySelectorAll('span, div, li, a, button')).find(el => hasNextLabel(el));
+        if (anyNextLike) {
+            const target = getClickableTarget(anyNextLike);
+            if (target && !isDisabledEl(target)) {
+                console.log('[LinkedIn Scraper] Found next-page control via final fallback', {
+                    tag: target.tagName,
+                    text: (target.innerText || target.textContent || '').trim(),
+                    aria: target.getAttribute('aria-label') || '',
+                    className: String(target.className || '')
+                });
+                return target;
+            }
+        }
+
+        return null;
+    }
+
+    async function collectNewUIJobsByScrolling(runJobs, runKeys, accumulatedKeys, minNewJobs, pageLabel) {
+        const scrollContainer = findScrollContainer();
+        const scrollAmount = 600;
+        const maxScrolls = 40;
+        const scrollDelay = 450;
+
+        let passAdded = 0;
+        let passTrulyNewAdded = 0;
+        let noNewUniqueCount = 0;
+        let stuckCount = 0;
+
+        // Capture the first rendered slice before scrolling.
+        const initialJobs = extractJobsFromPage();
+        const initialAdded = appendUniqueJobs(runJobs, runKeys, initialJobs, accumulatedKeys);
+        passAdded += initialAdded.added;
+        passTrulyNewAdded += initialAdded.trulyNewAdded;
+        if (initialAdded.added === 0) noNewUniqueCount++;
+
+        console.log(`[LinkedIn Scraper] New UI page ${pageLabel}: initial visible=${initialJobs.length}, +${initialAdded.added} unique`);
+        updateStatus(`Page ${pageLabel}: +${passAdded} unique, ${passTrulyNewAdded} new`);
+
+        for (let i = 0; i < maxScrolls; i++) {
+            let reachedEnd = false;
+
+            if (scrollContainer) {
+                const prev = scrollContainer.scrollTop;
+                scrollContainer.scrollTop += scrollAmount;
+                if (scrollContainer.scrollTop === prev) {
+                    reachedEnd = true;
+                    stuckCount++;
+                } else {
+                    stuckCount = 0;
+                }
+            } else {
+                window.scrollBy(0, scrollAmount);
+            }
+
+            await sleep(scrollDelay);
+
+            const visibleJobs = extractJobsFromPage();
+            const added = appendUniqueJobs(runJobs, runKeys, visibleJobs, accumulatedKeys);
+            passAdded += added.added;
+            passTrulyNewAdded += added.trulyNewAdded;
+
+            if (added.added === 0) {
+                noNewUniqueCount++;
+            } else {
+                noNewUniqueCount = 0;
+            }
+
+            const targetText = Number.isFinite(minNewJobs) ? `${passTrulyNewAdded}/${minNewJobs}` : `${passTrulyNewAdded}`;
+            updateStatus(`Page ${pageLabel}: ${passAdded} unique collected, ${targetText} new (scroll ${i+1}/${maxScrolls})`);
+            console.log(`[LinkedIn Scraper] New UI page ${pageLabel} scroll ${i+1}: visible=${visibleJobs.length}, +${added.added} unique (+${added.trulyNewAdded} new), pass=${passAdded}`);
+
+            if (Number.isFinite(minNewJobs) && passTrulyNewAdded >= minNewJobs) {
+                break;
+            }
+
+            // Virtualized lists may keep visible count constant. We stop based on no new UNIQUE jobs.
+            if (noNewUniqueCount >= 6) {
+                console.log(`[LinkedIn Scraper] New UI page ${pageLabel}: no new unique jobs after ${noNewUniqueCount} scrolls, stopping page scan`);
+                break;
+            }
+
+            if (reachedEnd && stuckCount >= 2 && noNewUniqueCount >= 2) {
+                console.log(`[LinkedIn Scraper] New UI page ${pageLabel}: reached scroll end and no progress`);
+                break;
+            }
+        }
+
+        // Return to top to keep pagination controls visible.
+        if (scrollContainer) {
+            scrollContainer.scrollTop = 0;
+        } else {
+            window.scrollTo(0, 0);
+        }
+        await sleep(350);
+
+        return { passAdded, passTrulyNewAdded };
+    }
+
+    async function scrapeNewUIUntilTarget(minNewJobs = Infinity) {
+        const allJobs = [];
+        const runKeys = new Set();
+        const accumulatedJobs = getAccumulatedJobs();
+        const accumulatedKeys = new Set(accumulatedJobs.map(j => getUniqueKey(j)));
+        let trulyNewTotal = 0;
+        let page = 1;
+        let noProgressPages = 0;
+        const maxPagesToTry = Number.isFinite(minNewJobs)
+            ? Math.min(Math.max(Math.ceil(minNewJobs / 20) + 3, 3), 30)
+            : 8;
+
+        console.log(`[LinkedIn Scraper] New UI scrape start: target=${minNewJobs}, accumulated=${accumulatedKeys.size}, maxPagesToTry=${maxPagesToTry}`);
+        updateStatus(`New UI: target ${minNewJobs} new jobs`);
+
+        while (page <= maxPagesToTry && trulyNewTotal < minNewJobs) {
+            const beforePageCount = allJobs.length;
+            const beforeTrulyNew = trulyNewTotal;
+
+            updateStatus(`Page ${page}: scrolling and collecting...`);
+            const perPageTarget = Number.isFinite(minNewJobs) ? (minNewJobs - trulyNewTotal) : Infinity;
+            const result = await collectNewUIJobsByScrolling(allJobs, runKeys, accumulatedKeys, perPageTarget, page);
+            trulyNewTotal += result.passTrulyNewAdded;
+
+            const pageAdded = allJobs.length - beforePageCount;
+            const pageTrulyNew = trulyNewTotal - beforeTrulyNew;
+            console.log(`[LinkedIn Scraper] New UI page ${page}: +${pageAdded} unique, +${pageTrulyNew} truly new, totals unique=${allJobs.length}, new=${trulyNewTotal}`);
+
+            if (pageAdded === 0) {
+                noProgressPages++;
+            } else {
+                noProgressPages = 0;
+            }
+
+            if (trulyNewTotal >= minNewJobs) {
+                updateStatus(`Target reached: ${trulyNewTotal} new jobs`);
+                break;
+            }
+
+            const nextBtn = findNextPageButton();
+            if (!nextBtn) {
+                console.log('[LinkedIn Scraper] New UI: no next-page button found after current batch');
+                updateStatus(`No next page button (got ${trulyNewTotal}/${minNewJobs} new)`);
+                break;
+            }
+
+            if (noProgressPages >= 2) {
+                console.log('[LinkedIn Scraper] New UI: no progress across pages, stopping');
+                updateStatus(`No progress across pages (got ${trulyNewTotal}/${minNewJobs} new)`);
+                break;
+            }
+
+            const beforeHref = location.href;
+            const beforeFirstIds = extractJobsFromPage().slice(0, 3).map(j => j.id).join('|');
+            updateStatus(`Going to page ${page + 1}...`);
+            try {
+                nextBtn.click();
+            } catch (e) {
+                console.error('[LinkedIn Scraper] New UI next-page click failed:', e);
+                updateStatus(`Next page click failed: ${e.message}`);
+                break;
+            }
+
+            await sleep(2500);
+            window.scrollTo(0, 0);
+            await sleep(800);
+
+            const afterFirstIds = extractJobsFromPage().slice(0, 3).map(j => j.id).join('|');
+            const moved = beforeHref !== location.href || beforeFirstIds !== afterFirstIds;
+            if (!moved) {
+                console.log('[LinkedIn Scraper] New UI: next-page click did not change visible jobs (may be infinite scroll or unsupported pager)');
+                // Continue one more iteration anyway; some UIs update lazily.
+                await sleep(1200);
+            }
+
+            page++;
+        }
+
+        if (page > maxPagesToTry && trulyNewTotal < minNewJobs) {
+            updateStatus(`Reached page scan limit (${maxPagesToTry}), got ${trulyNewTotal}/${minNewJobs} new`);
+        }
+
+        console.log(`[LinkedIn Scraper] New UI scrape done: unique=${allJobs.length}, trulyNew=${trulyNewTotal}`);
+        await outputJobs(allJobs);
+    }
     
     // ========================================
     // Scraping Functions
@@ -996,14 +1502,9 @@
         const pageInfo = getPageInfo();
 
         if (pageInfo.uiVersion === 'new') {
-            // New UI: scroll to load more jobs until reaching target
-            const scrollContainer = findScrollContainer();
-            if (scrollContainer) {
-                await scrollToRenderAll(scrollContainer);
-            }
-            const jobs = extractJobsFromPage();
-            console.log('[LinkedIn Scraper] Scrape At Least (new UI): extracted', jobs.length, 'jobs after scrolling');
-            await outputJobs(jobs);
+            // New UI: LinkedIn often virtualizes the list (DOM may only hold ~12 cards).
+            // We must collect incrementally while scrolling and then try pagination.
+            await scrapeNewUIUntilTarget(minCount);
             return;
         }
 
@@ -1022,7 +1523,7 @@
         let page = 1;
         
         const accumulatedJobs = getAccumulatedJobs();
-        const accumulatedKeys = new Set(accumulatedJobs.map(j => getDedupeKey(j)));
+        const accumulatedKeys = new Set(accumulatedJobs.map(j => getUniqueKey(j)));
         
         console.log(`[LinkedIn Scraper] Starting: maxPages=${maxPages}, target=${minNewJobs} NEW jobs, accumulated=${accumulatedKeys.size}`);
         updateStatus(`Starting: max ${maxPages} pages, target ${minNewJobs} new jobs`);
@@ -1035,9 +1536,9 @@
             await scrollToRenderAll(scrollContainer);
             const pageJobs = extractJobsFromPage();
             
-            const collectedKeys = new Set(allJobs.map(j => getDedupeKey(j)));
-            const newOnThisPage = pageJobs.filter(j => !collectedKeys.has(getDedupeKey(j)));
-            const trulyNewOnThisPage = newOnThisPage.filter(j => !accumulatedKeys.has(getDedupeKey(j)));
+            const collectedKeys = new Set(allJobs.map(j => getUniqueKey(j)));
+            const newOnThisPage = pageJobs.filter(j => !collectedKeys.has(getUniqueKey(j)));
+            const trulyNewOnThisPage = newOnThisPage.filter(j => !accumulatedKeys.has(getUniqueKey(j)));
             
             allJobs = allJobs.concat(newOnThisPage);
             trulyNewCount += trulyNewOnThisPage.length;
@@ -1050,8 +1551,7 @@
                 break;
             }
             
-            const nextBtn = document.querySelector('.jobs-search-pagination__button--next') ||
-                           document.querySelector('button[aria-label="View next page"]');
+            const nextBtn = findNextPageButton();
             
             if (nextBtn && !nextBtn.disabled) {
                 updateStatus('Going to page ' + (page + 1) + '...');
