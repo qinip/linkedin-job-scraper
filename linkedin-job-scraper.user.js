@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LinkedIn Job Scraper
 // @namespace    https://linkedin.com/
-// @version      0.1.5
+// @version      0.3.2
 // @description  Scrape LinkedIn jobs with accumulation, deduplication, and multi-language support. Supports both classic and new (Voyager) UI.
 // @author       Eddy Ji
 // @match        *://www.linkedin.com/jobs/*
@@ -109,8 +109,355 @@
         return LANG[lang][key] || LANG.en[key] || key;
     }
     
-    console.log('[LinkedIn Scraper v0.1.5] Script loaded!');
-    
+    console.log('[LinkedIn Scraper v0.3.2] Script loaded!');
+
+    // ========================================
+    // Voyager API Interceptor
+    // ========================================
+    // LinkedIn's new UI fetches job data via internal Voyager API.
+    // We intercept fetch() to capture structured JSON responses,
+    // which contain reliable job IDs, titles, companies, and URLs
+    // that the DOM may not expose (hashed classes, no <a> links).
+    // ========================================
+    const _voyagerJobCache = new Map(); // jobId -> { title, company, location, ... }
+
+    function _parseVoyagerResponse(data) {
+        // LinkedIn uses multiple response formats:
+        //   REST:    { included: [...], data: { paging: ... } }
+        //   GraphQL: { data: { included: [...], data: { ... } } }
+        //   Nested:  { data: { data: { ... }, included: [...] } }
+        let included = null;
+        if (Array.isArray(data && data.included)) {
+            included = data.included;
+        } else if (Array.isArray(data && data.data && data.data.included)) {
+            included = data.data.included;
+        }
+
+        if (!included || included.length === 0) {
+            // Debug: log top-level keys to help diagnose unknown formats
+            if (data && typeof data === 'object') {
+                const keys = Object.keys(data).slice(0, 8).join(', ');
+                const nestedKeys = data.data ? Object.keys(data.data).slice(0, 8).join(', ') : 'N/A';
+                console.log('[LinkedIn Scraper] Voyager response keys: [' + keys + '] data.*: [' + nestedKeys + ']');
+            }
+            return;
+        }
+
+        console.log('[LinkedIn Scraper] Voyager: parsing ' + included.length + ' included items');
+
+        // Build company lookup: entityUrn -> name
+        const companyNames = new Map();
+        for (const item of included) {
+            const t = (item && item['$type']) || '';
+            if (t.includes('Company') || t.includes('organization.Organization')) {
+                if (item.entityUrn && item.name) {
+                    companyNames.set(item.entityUrn, item.name);
+                }
+            }
+        }
+
+        // Extract from JobPostingCard items (richest card-level data)
+        let cardCount = 0;
+        for (const item of included) {
+            const t = (item && item['$type']) || '';
+            if (!t.includes('JobPostingCard')) continue;
+
+            const navUrl = item.navigationUrl || '';
+            let jobId = null;
+
+            // Extract job ID from navigationUrl
+            const urlMatch = navUrl.match(/\/jobs\/view\/(?:[a-zA-Z0-9-]+-)?(\d+)/);
+            if (urlMatch) {
+                jobId = urlMatch[1];
+            }
+
+            // Fallback: from jobCardUnion URN
+            if (!jobId) {
+                const postingRef = (item.jobCardUnion && (
+                    item.jobCardUnion['*jobPostingCard'] ||
+                    item.jobCardUnion['*jobPosting']
+                )) || '';
+                const urnMatch = postingRef.match(/:(\d+)$/);
+                if (urnMatch) jobId = urnMatch[1];
+            }
+
+            // Fallback: from trackingUrn
+            if (!jobId && item.trackingUrn) {
+                const urnMatch = item.trackingUrn.match(/:(\d+)$/);
+                if (urnMatch) jobId = urnMatch[1];
+            }
+
+            if (!jobId) continue;
+
+            const title = (item.title && item.title.text) || '';
+            const company = (item.primaryDescription && item.primaryDescription.text) || '';
+            const location = (item.secondaryDescription && item.secondaryDescription.text) || '';
+            const postedAgo = (item.tertiaryDescription && item.tertiaryDescription.text) || '';
+            const insightText = (item.insightText && item.insightText.text) || '';
+
+            // Parse footer items (may be strings or objects)
+            let salary = '';
+            let hasEasyApply = false;
+            const footerItems = item.footerItems || [];
+            for (const fi of footerItems) {
+                const fiText = (typeof fi === 'string') ? fi : ((fi && (fi.text || fi.label)) || '');
+                if (/\$[\d,]/.test(fiText)) salary = fiText;
+                if (/easy apply/i.test(fiText)) hasEasyApply = true;
+            }
+
+            // Derive flags from insight text
+            const isTopApplicant = /top applicant/i.test(insightText);
+            const hasConnections = /connection|alumni/i.test(insightText);
+
+            if (title) {
+                _voyagerJobCache.set(jobId, {
+                    id: jobId,
+                    title: title,
+                    company: company,
+                    location: location,
+                    salary: salary,
+                    postedAgo: postedAgo,
+                    isTopApplicant: isTopApplicant,
+                    hasEasyApply: hasEasyApply,
+                    hasConnections: hasConnections,
+                    link: 'https://www.linkedin.com/jobs/view/' + jobId + '/',
+                });
+                cardCount++;
+            }
+        }
+
+        // Also extract from JobPosting items (for jobs not in cards)
+        let postingCount = 0;
+        for (const item of included) {
+            const t = (item && item['$type']) || '';
+            if (!t.includes('JobPosting') || t.includes('Card')) continue;
+
+            const urn = item.dashEntityUrn || item.entityUrn || item.trackingUrn || '';
+            const urnMatch = urn.match(/:(\d+)$/);
+            if (!urnMatch) continue;
+            const jobId = urnMatch[1];
+
+            // Skip if we already have this from a card (cards have richer data)
+            if (_voyagerJobCache.has(jobId)) continue;
+
+            const title = item.title || '';
+            if (!title) continue;
+
+            // Resolve company name from URN
+            let company = '';
+            const companyUrn = (item.companyDetails && (
+                item.companyDetails['*companyResolutionResult'] ||
+                item.companyDetails.company
+            )) || '';
+            if (companyUrn) {
+                company = companyNames.get(companyUrn) || '';
+            }
+
+            _voyagerJobCache.set(jobId, {
+                id: jobId,
+                title: title,
+                company: company,
+                location: item.formattedLocation || '',
+                salary: '',
+                postedAgo: '',
+                isTopApplicant: false,
+                hasEasyApply: false,
+                hasConnections: false,
+                link: 'https://www.linkedin.com/jobs/view/' + jobId + '/',
+            });
+            postingCount++;
+        }
+
+        if (cardCount + postingCount > 0) {
+            console.log('[LinkedIn Scraper] Voyager: +' + cardCount + ' cards, +' + postingCount + ' postings (cache: ' + _voyagerJobCache.size + ' total)');
+        }
+    }
+
+    // URL patterns that carry job card data
+    function _isVoyagerJobUrl(url) {
+        return url && (
+            url.includes('voyagerJobsDashJobCards') ||
+            url.includes('voyagerJobsDashJobTracker') ||
+            url.includes('voyagerJobsDashJobSearch') ||
+            url.includes('/voyager/api/jobs') ||
+            (url.includes('/voyager/api/') && url.includes('job'))
+        );
+    }
+
+    // Install fetch + XHR interceptors
+    (function installVoyagerInterceptor() {
+        let _interceptCount = 0;
+
+        // ── fetch() interceptor ──
+        const origFetch = window.fetch;
+        window.fetch = async function() {
+            const response = await origFetch.apply(this, arguments);
+            try {
+                const url = (typeof arguments[0] === 'string')
+                    ? arguments[0]
+                    : ((arguments[0] && arguments[0].url) || '');
+                // Diagnostic: log any voyager/jobs network call
+                if (url.includes('/voyager/api/')) {
+                    console.log('[LinkedIn Scraper] fetch intercepted:', url.substring(0, 120));
+                }
+                if (_isVoyagerJobUrl(url)) {
+                    _interceptCount++;
+                    const clone = response.clone();
+                    clone.json().then(function(data) {
+                        _parseVoyagerResponse(data);
+                    }).catch(function() {});
+                }
+            } catch(e) {}
+            return response;
+        };
+
+        // ── XMLHttpRequest interceptor ──
+        const origXHROpen = XMLHttpRequest.prototype.open;
+        const origXHRSend = XMLHttpRequest.prototype.send;
+
+        XMLHttpRequest.prototype.open = function(method, url) {
+            this._ljs_url = url || '';
+            // Diagnostic: log any voyager/jobs XHR
+            if (typeof url === 'string' && url.includes('/voyager/api/')) {
+                console.log('[LinkedIn Scraper] XHR intercepted:', url.substring(0, 120));
+            }
+            return origXHROpen.apply(this, arguments);
+        };
+
+        XMLHttpRequest.prototype.send = function() {
+            if (this._ljs_url && _isVoyagerJobUrl(this._ljs_url)) {
+                _interceptCount++;
+                this.addEventListener('load', function() {
+                    try {
+                        const data = JSON.parse(this.responseText);
+                        _parseVoyagerResponse(data);
+                    } catch(e) {}
+                });
+            }
+            return origXHRSend.apply(this, arguments);
+        };
+
+        console.log('[LinkedIn Scraper] Voyager interceptor installed (fetch + XHR)');
+
+        // Periodic diagnostic: report if nothing intercepted after 15s
+        setTimeout(function() {
+            if (_interceptCount === 0) {
+                console.warn('[LinkedIn Scraper] ⚠ No Voyager API calls intercepted after 15s. Trying embedded data scan...');
+                _scanEmbeddedData();
+            } else {
+                console.log('[LinkedIn Scraper] ✓ Intercepted ' + _interceptCount + ' Voyager API calls');
+            }
+        }, 15000);
+    })();
+
+    // ========================================
+    // Embedded Data Scanner
+    // ========================================
+    // LinkedIn's new UI embeds job data server-side in <code> and <script> tags.
+    // When no network requests are intercepted, we scan the page for this data.
+    function _scanEmbeddedData() {
+        let found = 0;
+
+        // Strategy 1: <code> elements (LinkedIn's preferred pattern for SSR data)
+        const codeElements = document.querySelectorAll('code');
+        for (const el of codeElements) {
+            const text = el.textContent || '';
+            if (text.length < 50 || !text.includes('jobPosting')) continue;
+            try {
+                const data = JSON.parse(text);
+                _parseVoyagerResponse(data);
+                found++;
+            } catch(e) {}
+        }
+
+        // Strategy 2: <script type="application/json"> tags
+        const jsonScripts = document.querySelectorAll('script[type="application/json"]');
+        for (const el of jsonScripts) {
+            const text = el.textContent || '';
+            if (text.length < 50 || !text.includes('jobPosting')) continue;
+            try {
+                const data = JSON.parse(text);
+                _parseVoyagerResponse(data);
+                found++;
+            } catch(e) {}
+        }
+
+        // Strategy 3: Scan ALL <script> tags for embedded state objects
+        if (_voyagerJobCache.size === 0) {
+            const allScripts = document.querySelectorAll('script:not([src])');
+            for (const el of allScripts) {
+                const text = el.textContent || '';
+                if (text.length < 100) continue;
+                // Look for JSON blobs containing job URNs
+                const urnMatches = text.match(/urn:li:fsd_jobPosting:\d+/g);
+                if (!urnMatches || urnMatches.length === 0) continue;
+                console.log('[LinkedIn Scraper] Found script with ' + urnMatches.length + ' job URNs (' + text.length + ' chars)');
+                // Try to extract JSON objects from the script
+                const jsonMatches = text.match(/\{[^{}]*"included"\s*:\s*\[[\s\S]*?\]\s*\}/g);
+                if (jsonMatches) {
+                    for (const jsonStr of jsonMatches) {
+                        try {
+                            const data = JSON.parse(jsonStr);
+                            _parseVoyagerResponse(data);
+                            found++;
+                        } catch(e) {}
+                    }
+                }
+            }
+        }
+
+        // Strategy 4: Brute-force extract job IDs from ALL page HTML
+        // Last resort: just find job IDs and create minimal entries
+        if (_voyagerJobCache.size === 0) {
+            const html = document.documentElement.innerHTML;
+            const idSet = new Set();
+            // Match URNs in any context
+            const urnRegex = /(?:fsd_jobPosting|jobPosting)[:%]3A(\d{8,})/g;
+            let m;
+            while ((m = urnRegex.exec(html)) !== null) {
+                idSet.add(m[1]);
+            }
+            // Also match /jobs/view/ID URLs
+            const urlRegex = /\/jobs\/view\/(?:[a-zA-Z0-9-]+-)?(\d{8,})/g;
+            while ((m = urlRegex.exec(html)) !== null) {
+                idSet.add(m[1]);
+            }
+            if (idSet.size > 0) {
+                console.log('[LinkedIn Scraper] Brute-force found ' + idSet.size + ' job IDs in page HTML');
+                for (const id of idSet) {
+                    if (!_voyagerJobCache.has(id)) {
+                        _voyagerJobCache.set(id, {
+                            id: id,
+                            title: '',  // Will be matched by enrichWithVoyagerData via title
+                            company: '',
+                            location: '',
+                            salary: '',
+                            postedAgo: '',
+                            isTopApplicant: false,
+                            hasEasyApply: false,
+                            hasConnections: false,
+                            link: 'https://www.linkedin.com/jobs/view/' + id + '/',
+                        });
+                    }
+                }
+                found++;
+            }
+        }
+
+        if (found > 0 || _voyagerJobCache.size > 0) {
+            console.log('[LinkedIn Scraper] Embedded scan: found data in ' + found + ' elements, cache now ' + _voyagerJobCache.size + ' jobs');
+        } else {
+            console.warn('[LinkedIn Scraper] Embedded scan: no job data found in page');
+        }
+    }
+
+    // Also run scan on demand (called before enrichment if cache is empty)
+    function _ensureVoyagerCache() {
+        if (_voyagerJobCache.size === 0) {
+            _scanEmbeddedData();
+        }
+    }
+
     // ========================================
     // UI Version Detection
     // ========================================
@@ -233,6 +580,26 @@
         console.log('[LinkedIn Scraper] Creating UI...');
         createUI();
     }, 3000);
+
+    // Detect SPA navigation and re-create UI panel
+    (function watchSPANavigation() {
+        let lastUrl = location.href;
+        setInterval(function() {
+            if (location.href !== lastUrl) {
+                const oldUrl = lastUrl;
+                lastUrl = location.href;
+                // Only react to job-page navigations
+                if (location.pathname.includes('/jobs/')) {
+                    console.log('[LinkedIn Scraper] SPA navigation detected: ' + oldUrl.split('?')[0] + ' -> ' + location.pathname);
+                    // Wait for new page to render, then refresh panel
+                    setTimeout(function() {
+                        console.log('[LinkedIn Scraper] Refreshing UI panel after SPA navigation');
+                        createUI();
+                    }, 2000);
+                }
+            }
+        }, 1000);
+    })();
     
     // ========================================
     // Page Info Detection
@@ -329,7 +696,7 @@
         // Header row
         const header = createDiv({display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px'});
         const title = document.createElement('strong');
-        title.textContent = '🔍 ' + t('title') + ' v0.1.5';
+        title.textContent = '🔍 ' + t('title') + ' v0.3.2';
         title.style.fontSize = '14px';
         
         const headerBtns = createDiv({display: 'flex', gap: '8px', alignItems: 'center'});
@@ -351,22 +718,9 @@
         accRow.appendChild(clearBtn);
         panel.appendChild(accRow);
         
-        // Quick Scrape button (primary - scrapes what's loaded, no scrolling)
-        const quickBtn = createButton('ljs-quick', '', {width: '100%', padding: '12px', margin: '5px 0', background: 'white', color: '#0a66c2', fontWeight: 'bold', fontSize: '14px', textAlign: 'left', display: 'block'});
-        const quickLine1 = document.createElement('div');
-        quickLine1.textContent = t('quickScrape') + ' (~' + pageInfo.visibleJobs + ' ' + t('jobs') + ')';
-        const quickLine2 = document.createElement('div');
-        quickLine2.textContent = '💡 ' + t('currentlyVisible') + ' - ' + t('zoomTip');
-        quickLine2.style.fontSize = '10px';
-        quickLine2.style.opacity = '0.7';
-        quickLine2.style.marginTop = '2px';
-        quickBtn.appendChild(quickLine1);
-        quickBtn.appendChild(quickLine2);
-        panel.appendChild(quickBtn);
-        
-        // Scrape At Least row (secondary - scrolls/paginates to reach target)
+        // Scrape At Least row (primary action)
         const minRow = createDiv({display: 'flex', alignItems: 'center', margin: '5px 0', gap: '5px'});
-        const minBtn = createButton('ljs-scrape-min', t('scrapeAtLeast'), {flex: '1', padding: '10px', background: 'rgba(255,255,255,0.3)', fontSize: '13px'});
+        const minBtn = createButton('ljs-scrape-min', t('scrapeAtLeast'), {flex: '1', padding: '12px', background: 'white', color: '#0a66c2', fontSize: '14px', fontWeight: 'bold'});
         const minInput = document.createElement('input');
         minInput.type = 'number';
         minInput.id = 'ljs-min-count';
@@ -430,9 +784,6 @@
             createUI();
         };
         
-        const quickBtn = document.getElementById('ljs-quick');
-        if (quickBtn) quickBtn.onclick = () => quickScrape();
-
         const scrapeMinBtn = document.getElementById('ljs-scrape-min');
         if (scrapeMinBtn) {
             scrapeMinBtn.onclick = () => {
@@ -452,16 +803,7 @@
     
     function startPeriodicUpdate() {
         setInterval(() => {
-            const pageInfo = getPageInfo();
-
-            // Update Quick Scrape button with current visible count
-            const quickBtn = document.getElementById('ljs-quick');
-            if (quickBtn) {
-                const line1 = quickBtn.querySelector('div');
-                if (line1) {
-                    line1.textContent = t('quickScrape') + ' (~' + pageInfo.visibleJobs + ' ' + t('jobs') + ')';
-                }
-            }
+            // Periodic UI refresh (placeholder for future updates)
         }, 3000);
     }
     
@@ -724,6 +1066,15 @@
                     const trackingEl = card.querySelector('[data-view-tracking-scope]');
                     if (trackingEl) {
                         jobId = extractJobIdFromTracking(trackingEl);
+                    }
+                }
+
+                // Fallback: extract job ID from /jobs/view/ links in the card DOM
+                if (!jobId) {
+                    const jobLink = card.querySelector('a[href*="/jobs/view/"]');
+                    if (jobLink) {
+                        const hrefMatch = (jobLink.href || '').match(/\/jobs\/view\/(?:[a-zA-Z0-9-]+-)?(\d+)/);
+                        if (hrefMatch) jobId = hrefMatch[1];
                     }
                 }
 
@@ -1178,16 +1529,213 @@
         return jobs;
     }
     
+    // ========================================
+    // Voyager Enrichment
+    // ========================================
+    function enrichWithVoyagerData(jobs) {
+        _ensureVoyagerCache();
+        if (_voyagerJobCache.size === 0) return jobs;
+
+        const now = new Date().toISOString();
+        let enriched = 0;
+        let added = 0;
+
+        // Step 1: Upgrade DOM jobs that have pseudo-IDs with Voyager data
+        const usedVoyagerIds = new Set();
+        for (const job of jobs) {
+            // Only upgrade fallback jobs (pseudo-ID, no link)
+            if (!job.id || !job.id.startsWith('newui-')) continue;
+
+            // Try to find matching Voyager entry by title + company
+            let bestMatch = null;
+            for (const [vid, vjob] of _voyagerJobCache) {
+                if (usedVoyagerIds.has(vid)) continue;
+
+                // Exact title match
+                if (vjob.title === job.title) {
+                    bestMatch = [vid, vjob];
+                    break;
+                }
+                // Fuzzy: same company + similar title
+                if (vjob.company && job.company &&
+                    vjob.company.toLowerCase() === job.company.toLowerCase() &&
+                    vjob.title.toLowerCase().includes(job.title.toLowerCase().substring(0, 20))) {
+                    bestMatch = [vid, vjob];
+                    // Don't break, keep looking for exact match
+                }
+            }
+
+            if (bestMatch) {
+                const [vid, vjob] = bestMatch;
+                usedVoyagerIds.add(vid);
+                job.id = vid;
+                job.link = vjob.link;
+                job._source = 'linkedin-new-ui-voyager';
+                if (!job.company || job.company === 'Unknown') job.company = vjob.company;
+                if (!job.location || job.location === 'Unknown') job.location = vjob.location;
+                if (!job.salary && vjob.salary) job.salary = vjob.salary;
+                if (vjob.isTopApplicant) job.isTopApplicant = true;
+                if (vjob.hasConnections) job.hasConnections = true;
+                job.dedupeKey = getDedupeKey(job);
+                enriched++;
+            }
+        }
+
+        // Step 2: Add Voyager-only jobs not found in DOM
+        const existingIds = new Set(jobs.map(j => j.id));
+        // Also build title+company set to avoid near-duplicates
+        const existingTitles = new Set(jobs.map(j =>
+            ((j.company || '') + '|||' + (j.title || '')).toLowerCase()
+        ));
+
+        for (const [vid, vjob] of _voyagerJobCache) {
+            if (existingIds.has(vid)) continue;
+            if (usedVoyagerIds.has(vid)) continue;
+            // Skip if same title+company already in DOM results
+            const key = (vjob.company + '|||' + vjob.title).toLowerCase();
+            if (existingTitles.has(key)) continue;
+
+            const newJob = {
+                id: vid,
+                title: (vjob.title || '').substring(0, 150),
+                company: (vjob.company || 'Unknown').substring(0, 100),
+                location: (vjob.location || 'Unknown').substring(0, 100),
+                salary: vjob.salary || '',
+                isTopApplicant: vjob.isTopApplicant || false,
+                hasEasyApply: vjob.hasEasyApply || false,
+                hasConnections: vjob.hasConnections || false,
+                postedAgo: vjob.postedAgo || '',
+                daysAgo: parsePostedAgo(vjob.postedAgo || ''),
+                postedDate: '',
+                insight: '',
+                footer: '',
+                link: vjob.link,
+                extractedAt: now,
+                _source: 'linkedin-voyager-api',
+            };
+            newJob.dedupeKey = getDedupeKey(newJob);
+            jobs.push(newJob);
+            added++;
+        }
+
+        if (enriched + added > 0) {
+            console.log('[LinkedIn Scraper] Voyager enrichment: ' + enriched + ' upgraded, ' + added + ' new (from ' + _voyagerJobCache.size + ' cached)');
+        }
+
+        return jobs;
+    }
+
+    // ========================================
+    // Click-based ID enrichment for New UI
+    // ========================================
+    // When new UI cards have no job ID, we click each card to make LinkedIn
+    // update the URL with ?currentJobId=NUMERIC_ID, then read it back.
+    async function enrichByClicking(jobs) {
+        const needEnrichment = jobs.filter(j => j.id && j.id.startsWith('newui-'));
+        if (needEnrichment.length === 0) return;
+
+        console.log(`[LinkedIn Scraper] Click-enrichment: ${needEnrichment.length} jobs need IDs`);
+        updateStatus(`Enriching ${needEnrichment.length} jobs by clicking...`);
+
+        // Find clickable cards in DOM - match by title text
+        const cardElements = getNewUIJobCards();
+        const titleToCard = new Map();
+        for (const card of cardElements) {
+            // Extract visible title from card for matching
+            const titleEl = card.querySelector('p') || card;
+            const lines = (card.innerText || '').split('\n').map(s => s.trim()).filter(Boolean);
+            // First meaningful line is usually the title
+            for (const line of lines) {
+                if (line.length > 3 && line.length < 150 && !/^\$|applicant|Easy Apply|Promoted|ago$/i.test(line)) {
+                    titleToCard.set(line, card);
+                    break;
+                }
+            }
+        }
+
+        // Save current URL to restore later
+        const originalUrl = location.href;
+        let enriched = 0;
+
+        for (const job of needEnrichment) {
+            // Find matching card in DOM
+            let card = titleToCard.get(job.title);
+            if (!card) {
+                // Fuzzy: try prefix match
+                for (const [cardTitle, cardEl] of titleToCard) {
+                    if (cardTitle.startsWith(job.title.substring(0, 30)) ||
+                        job.title.startsWith(cardTitle.substring(0, 30))) {
+                        card = cardEl;
+                        break;
+                    }
+                }
+            }
+            if (!card) continue;
+
+            // Click the card
+            try {
+                card.click();
+            } catch(e) {
+                continue;
+            }
+
+            // Wait for URL to update with currentJobId
+            let jobId = null;
+            for (let wait = 0; wait < 6; wait++) {
+                await sleep(150);
+                const urlMatch = location.href.match(/currentJobId=(\d+)/);
+                if (urlMatch) {
+                    jobId = urlMatch[1];
+                    break;
+                }
+                // Also check for /jobs/view/ID in the URL
+                const viewMatch = location.href.match(/\/jobs\/view\/(?:[a-zA-Z0-9-]+-)?(\d+)/);
+                if (viewMatch) {
+                    jobId = viewMatch[1];
+                    break;
+                }
+            }
+
+            if (jobId) {
+                job.id = jobId;
+                job.link = 'https://www.linkedin.com/jobs/view/' + jobId + '/';
+                job._source = 'linkedin-new-ui-click';
+                job.dedupeKey = getDedupeKey(job);
+                enriched++;
+            }
+
+            // Brief pause between clicks to avoid rate limiting
+            if (enriched % 5 === 0 && enriched > 0) {
+                updateStatus(`Enriching... ${enriched}/${needEnrichment.length}`);
+            }
+        }
+
+        console.log(`[LinkedIn Scraper] Click-enrichment: ${enriched}/${needEnrichment.length} jobs got IDs`);
+        updateStatus(`Click-enrichment: ${enriched} IDs found`);
+
+        // Scroll back to top
+        const scrollContainer = findScrollContainer();
+        if (scrollContainer) {
+            scrollContainer.scrollTop = 0;
+        }
+        window.scrollTo(0, 0);
+        await sleep(300);
+    }
+
     // Unified extraction function
     function extractJobsFromPage() {
         const uiVersion = detectUIVersion();
         console.log(`[LinkedIn Scraper] Extracting from ${uiVersion} UI`);
-        
+
+        let jobs;
         if (uiVersion === 'new') {
-            return extractJobsFromNewUI();
+            jobs = extractJobsFromNewUI();
+            // Enrich new-UI fallback jobs with Voyager API data
+            enrichWithVoyagerData(jobs);
         } else {
-            return extractJobsFromClassicUI();
+            jobs = extractJobsFromClassicUI();
         }
+        return jobs;
     }
 
     function findNextPageButton() {
@@ -1420,6 +1968,11 @@
             const pageTrulyNew = trulyNewTotal - beforeTrulyNew;
             console.log(`[LinkedIn Scraper] New UI page ${page}: +${pageAdded} unique, +${pageTrulyNew} truly new, totals unique=${allJobs.length}, new=${trulyNewTotal}`);
 
+            // Click-enrich this page's jobs while cards are still in DOM
+            if (pageAdded > 0) {
+                await enrichByClicking(allJobs);
+            }
+
             if (pageAdded === 0) {
                 noProgressPages++;
             } else {
@@ -1475,6 +2028,10 @@
         }
 
         console.log(`[LinkedIn Scraper] New UI scrape done: unique=${allJobs.length}, trulyNew=${trulyNewTotal}`);
+
+        // Final click-enrich for last page's remaining jobs
+        await enrichByClicking(allJobs);
+
         await outputJobs(allJobs);
     }
     
@@ -1490,6 +2047,8 @@
             // For new UI, this gets what's currently rendered
             const jobs = extractJobsFromPage();
             console.log('[LinkedIn Scraper] Quick scrape: extracted', jobs.length, 'jobs');
+            // Click-enrich fallback jobs to get real IDs
+            await enrichByClicking(jobs);
             await outputJobs(jobs);
         } catch(e) {
             console.error('[LinkedIn Scraper] quickScrape error:', e);
@@ -1497,9 +2056,40 @@
         }
     }
     
+    async function waitForJobCards(maxWaitMs) {
+        // After SPA navigation, LinkedIn may still be rendering.
+        // Wait until job cards appear in the DOM, or timeout.
+        const start = Date.now();
+        const checkInterval = 300;
+        while (Date.now() - start < maxWaitMs) {
+            const ui = detectUIVersion();
+            if (ui !== 'unknown') {
+                console.log(`[LinkedIn Scraper] Job cards detected (${ui}) after ${Date.now() - start}ms`);
+                return ui;
+            }
+            updateStatus('Waiting for page to render...');
+            await sleep(checkInterval);
+        }
+        // Final check
+        const finalUi = detectUIVersion();
+        console.log(`[LinkedIn Scraper] waitForJobCards timeout (${maxWaitMs}ms), UI=${finalUi}`);
+        return finalUi;
+    }
+
     async function scrapeMinimumJobs(minCount) {
         updateStatus(`${t('scrapeAtLeast')} ${minCount}...`);
-        const pageInfo = getPageInfo();
+
+        // Wait for LinkedIn to finish rendering after SPA navigation
+        let pageInfo = getPageInfo();
+        if (pageInfo.uiVersion === 'unknown') {
+            const detectedUi = await waitForJobCards(5000);
+            pageInfo = getPageInfo();
+            if (pageInfo.uiVersion === 'unknown' && detectedUi === 'unknown') {
+                updateStatus('No job cards found. Try refreshing the page.');
+                console.warn('[LinkedIn Scraper] No job cards detected after waiting. Page may not be a job listing.');
+                return;
+            }
+        }
 
         if (pageInfo.uiVersion === 'new') {
             // New UI: LinkedIn often virtualizes the list (DOM may only hold ~12 cards).
