@@ -66,18 +66,23 @@
 
 ```json
 {
-  "id": "4331586853",
-  "title": "Staff Machine Learning Engineer",
-  "company": "Example Corp",
-  "location": "San Francisco, CA (Hybrid)",
-  "salary": "$175K/yr - $225K/yr",
+  "id": "4363843832",
+  "title": "Machine Learning Engineer - AI Decision Intelligence Platform",
+  "company": "Andiamo",
+  "location": "Washington, DC (Hybrid)",
+  "salary": "",
   "isTopApplicant": true,
-  "hasConnections": false,
   "hasEasyApply": true,
-  "postedAgo": "3 days ago",
-  "daysAgo": 3,
-  "postedDate": "2026-01-22",
-  "link": "https://www.linkedin.com/jobs/view/4331586853/"
+  "hasConnections": false,
+  "postedAgo": "",
+  "daysAgo": -1,
+  "postedDate": "",
+  "insight": "You'd be a top applicant",
+  "footer": "Viewed, Promoted, Easy Apply",
+  "link": "https://www.linkedin.com/jobs/view/4363843832/",
+  "extractedAt": "2026-03-18T22:36:53.439Z",
+  "_source": "linkedin-classic-ui",
+  "dedupeKey": "andiamo|||machine learning engineer...|||washington, dc"
 }
 ```
 
