@@ -66,25 +66,38 @@ Click: [Install Script](https://raw.githubusercontent.com/qinip/linkedin-job-scr
 
 ```json
 {
-  "id": "4363843832",
-  "title": "Machine Learning Engineer - AI Decision Intelligence Platform",
-  "company": "Andiamo",
-  "location": "Washington, DC (Hybrid)",
-  "salary": "",
-  "isTopApplicant": true,
-  "hasEasyApply": true,
-  "hasConnections": false,
-  "postedAgo": "",
-  "daysAgo": -1,
-  "postedDate": "",
-  "insight": "You'd be a top applicant",
-  "footer": "Viewed, Promoted, Easy Apply",
-  "link": "https://www.linkedin.com/jobs/view/4363843832/",
-  "extractedAt": "2026-03-18T22:36:53.439Z",
+  "id": "4384783023",
+  "title": "Lead Data Scientist",
+  "company": "Mastercard",
+  "location": "Purchase, NY (Hybrid)",
+  "salary": "$140K/yr - $231K/yr",
+  "isTopApplicant": false,
+  "hasEasyApply": false,
+  "hasConnections": true,
+  "postedAgo": "18 hours ago",
+  "daysAgo": 0,
+  "postedDate": "2026-03-18",
+  "insight": "1 connection works here",
+  "footer": "18 hours ago",
+  "link": "https://www.linkedin.com/jobs/view/4384783023/",
+  "extractedAt": "2026-03-18T22:38:30.114Z",
   "_source": "linkedin-classic-ui",
-  "dedupeKey": "andiamo|||machine learning engineer...|||washington, dc"
+  "dedupeKey": "mastercard|||lead data scientist|||purchase, ny"
 }
 ```
+
+**Field reliability:**
+
+| Field | Reliability | Notes |
+|-------|------------|-------|
+| `id`, `company`, `location` | ~100% | Always available |
+| `title` | ~99% | Always available |
+| `link` | ~97% | Via click-based ID enrichment (v0.3.2) |
+| `salary` | ~55% | Only when LinkedIn displays it |
+| `insight` | ~28% | "Top Applicant", "N connections work here", etc. |
+| `postedAgo` / `postedDate` | ~15% | Hard to capture on new UI |
+
+Fields like `salary`, `insight`, and `postedAgo` are best-effort - they depend on what LinkedIn renders for each job card.
 
 ## Changelog
 

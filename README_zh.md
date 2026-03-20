@@ -66,25 +66,38 @@
 
 ```json
 {
-  "id": "4363843832",
-  "title": "Machine Learning Engineer - AI Decision Intelligence Platform",
-  "company": "Andiamo",
-  "location": "Washington, DC (Hybrid)",
-  "salary": "",
-  "isTopApplicant": true,
-  "hasEasyApply": true,
-  "hasConnections": false,
-  "postedAgo": "",
-  "daysAgo": -1,
-  "postedDate": "",
-  "insight": "You'd be a top applicant",
-  "footer": "Viewed, Promoted, Easy Apply",
-  "link": "https://www.linkedin.com/jobs/view/4363843832/",
-  "extractedAt": "2026-03-18T22:36:53.439Z",
+  "id": "4384783023",
+  "title": "Lead Data Scientist",
+  "company": "Mastercard",
+  "location": "Purchase, NY (Hybrid)",
+  "salary": "$140K/yr - $231K/yr",
+  "isTopApplicant": false,
+  "hasEasyApply": false,
+  "hasConnections": true,
+  "postedAgo": "18 hours ago",
+  "daysAgo": 0,
+  "postedDate": "2026-03-18",
+  "insight": "1 connection works here",
+  "footer": "18 hours ago",
+  "link": "https://www.linkedin.com/jobs/view/4384783023/",
+  "extractedAt": "2026-03-18T22:38:30.114Z",
   "_source": "linkedin-classic-ui",
-  "dedupeKey": "andiamo|||machine learning engineer...|||washington, dc"
+  "dedupeKey": "mastercard|||lead data scientist|||purchase, ny"
 }
 ```
+
+**字段可靠性：**
+
+| 字段 | 可靠性 | 说明 |
+|------|--------|------|
+| `id`, `company`, `location` | ~100% | 始终可用 |
+| `title` | ~99% | 始终可用 |
+| `link` | ~97% | 通过点击式 ID 补全获取 (v0.3.2) |
+| `salary` | ~55% | 仅当 LinkedIn 显示薪资时 |
+| `insight` | ~28% | "Top Applicant"、"N connections work here" 等 |
+| `postedAgo` / `postedDate` | ~15% | 新 UI 下难以抓取 |
+
+`salary`、`insight`、`postedAgo` 等字段为尽力抓取，取决于 LinkedIn 对每张职位卡片的渲染内容。
 
 ## 更新日志
 
