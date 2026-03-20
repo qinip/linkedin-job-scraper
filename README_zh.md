@@ -9,6 +9,7 @@
 ## 支持的页面
 
 - 推荐职位 (`/jobs/collections/recommended/`)
+- Top Applicant 职位 (`/jobs/collections/top-applicant/`)
 - 已保存职位 (`/jobs/collections/saved/`)
 - 搜索结果 (`/jobs/search/`)
 - 职位主页 (`/jobs/`)
@@ -16,6 +17,7 @@
 ## 功能
 
 - 从任意 LinkedIn 职位页面抓取职位
+- **三种 UI 自动识别** - Classic、New (Voyager) 和 Collections (Top Applicant/推荐) 页面全支持 (v0.3.4)
 - **点击式职位 ID 补全** - 自动点击每张职位卡片获取 LinkedIn 职位 ID，链接率达到约 97% (v0.3.2)
 - 自动去重（基于公司 + 职位名 + 地点）
 - 累积模式 - 多次抓取自动合并
@@ -100,6 +102,13 @@
 `salary`、`insight`、`postedAgo` 等字段为尽力抓取，取决于 LinkedIn 对每张职位卡片的渲染内容。
 
 ## 更新日志
+
+### v0.3.4 (2026-03-20)
+- **Collections UI 支持** - 新增第三种 UI 识别，支持 LinkedIn "Top Applicant" 和推荐页面 (`div[data-job-id]` + `job-card-list__entity-lockup`)
+- 修复 Collections 页面首次抓取返回 0 结果的问题（竞态条件：URL 匹配但 DOM 未渲染）
+- 无限滚动页面增加滚动尝试次数（30 到 50）
+- 默认最小抓取目标从 50 改为 100
+- 改进 `waitForJobCards`，验证实际 DOM 中是否有职位卡片而非仅检测 UI 类型
 
 ### v0.3.2 (2026-03-18)
 - 点击式职位 ID 补全（链接率从 43% 提升到 97%）

@@ -9,6 +9,7 @@ A Tampermonkey userscript that scrapes job listings from LinkedIn job pages with
 ## Supported Pages
 
 - Recommended jobs (`/jobs/collections/recommended/`)
+- Top Applicant jobs (`/jobs/collections/top-applicant/`)
 - Saved jobs (`/jobs/collections/saved/`)
 - Search results (`/jobs/search/`)
 - Jobs home (`/jobs/`)
@@ -16,6 +17,7 @@ A Tampermonkey userscript that scrapes job listings from LinkedIn job pages with
 ## Features
 
 - Scrape jobs from any LinkedIn Jobs page
+- **Three UI variant support** - Classic, New (Voyager), and Collections (Top Applicant/Recommendations) pages (v0.3.4)
 - **Click-based job ID enrichment** - automatically clicks each job card to capture the LinkedIn job ID, achieving ~97% link rate (v0.3.2)
 - Auto-deduplication using company + title + location
 - Accumulation mode - multiple scrapes combine automatically
@@ -100,6 +102,13 @@ Click: [Install Script](https://raw.githubusercontent.com/qinip/linkedin-job-scr
 Fields like `salary`, `insight`, and `postedAgo` are best-effort - they depend on what LinkedIn renders for each job card.
 
 ## Changelog
+
+### v0.3.4 (2026-03-20)
+- **Collections UI support** - added third UI detection path for LinkedIn's "Top Applicant" and recommendation pages (`div[data-job-id]` + `job-card-list__entity-lockup`)
+- Fixed first-scrape returning 0 results on collections pages (race condition: URL pattern matched before DOM rendered)
+- Increased scroll attempts for infinite-scroll pages (30 to 50)
+- Default minimum scrape target changed from 50 to 100
+- Improved `waitForJobCards` to verify actual card DOM presence, not just UI type detection
 
 ### v0.3.2 (2026-03-18)
 - Click-based job ID enrichment (link rate 43% to 97%)

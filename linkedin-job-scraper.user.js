@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LinkedIn Job Scraper
 // @namespace    https://linkedin.com/
-// @version      0.3.2
+// @version      0.3.4
 // @description  Scrape LinkedIn jobs with accumulation, deduplication, and multi-language support. Supports both classic and new (Voyager) UI.
 // @author       Eddy Ji
 // @match        *://www.linkedin.com/jobs/*
@@ -462,28 +462,33 @@
     // UI Version Detection
     // ========================================
     function detectUIVersion() {
-        // New UI (Voyager): uses div[role="button"] for job cards, hashed class names
+        // Collections UI: uses div[data-job-id] with .job-card-list__entity-lockup (Top Applicant, recommendations)
         // Classic UI: uses li[data-occludable-job-id] with .job-card-container
-        
+        // New UI (Voyager): uses div[role="button"] for job cards, hashed class names
+
+        const collectionsJobCards = document.querySelectorAll('div[data-job-id]');
         const classicJobCards = document.querySelectorAll('li[data-occludable-job-id] .job-card-container');
         const newUIJobCards = document.querySelectorAll('div[role="button"]');
-        
+
         // Check for new UI indicators
         const hasNewUICards = Array.from(newUIJobCards).some(card => {
             const text = card.textContent;
-            return (text.includes('Verified job') || text.includes('/yr') || text.includes('/hr')) && 
+            return (text.includes('Verified job') || text.includes('/yr') || text.includes('/hr') ||
+                    text.includes('Top Applicant') || text.includes('applicant') || text.includes('Easy Apply')) &&
                    text.length > 30 && text.length < 800;
         });
-        
+
         // Check URL pattern
         const isSearchResults = window.location.pathname.includes('/jobs/search-results');
-        
-        if (classicJobCards.length > 0) {
+
+        if (collectionsJobCards.length > 0) {
+            return 'collections';
+        } else if (classicJobCards.length > 0) {
             return 'classic';
         } else if (hasNewUICards || isSearchResults) {
             return 'new';
         }
-        
+
         return 'unknown';
     }
     
@@ -607,6 +612,17 @@
     function getPageInfo() {
         const uiVersion = detectUIVersion();
         
+        if (uiVersion === 'collections') {
+            const jobCards = document.querySelectorAll('div[data-job-id]');
+            return {
+                currentPage: 1,
+                totalPages: 1,
+                estimatedTotal: jobCards.length,
+                visibleJobs: jobCards.length,
+                uiVersion: 'collections'
+            };
+        }
+
         if (uiVersion === 'new') {
             // New UI: count visible job cards
             const jobCards = getNewUIJobCards();
@@ -618,7 +634,7 @@
                 uiVersion: 'new'
             };
         }
-        
+
         // Classic UI
         const pageStateEl = document.querySelector('.jobs-search-pagination__page-state');
         let totalPages = 1;
@@ -724,7 +740,7 @@
         const minInput = document.createElement('input');
         minInput.type = 'number';
         minInput.id = 'ljs-min-count';
-        minInput.value = '50';
+        minInput.value = '100';
         minInput.min = '10';
         minInput.max = '500';
         setStyles(minInput, {width: '60px', padding: '8px', border: 'none', borderRadius: '4px', textAlign: 'center', fontSize: '13px'});
@@ -1300,6 +1316,28 @@
     function findScrollContainer() {
         const uiVersion = detectUIVersion();
         
+        // Collections UI: Find scroll container by tracing up from a div[data-job-id] card
+        if (uiVersion === 'collections') {
+            const jobCard = document.querySelector('div[data-job-id]');
+            if (jobCard) {
+                let parent = jobCard;
+                for (let i = 0; i < 10; i++) {
+                    parent = parent.parentElement;
+                    if (!parent || parent === document.body) break;
+                    const style = window.getComputedStyle(parent);
+                    const childCards = parent.querySelectorAll('div[data-job-id]').length;
+                    if ((style.overflowY === 'auto' || style.overflowY === 'scroll') &&
+                        childCards > 3 &&
+                        parent.scrollHeight > parent.clientHeight + 50) {
+                        console.log(`[LinkedIn Scraper] Found collections scroll container at level ${i} (cards=${childCards})`);
+                        return parent;
+                    }
+                }
+            }
+            console.warn('[LinkedIn Scraper] Collections UI scroll container not found; will fall back to window scroll');
+            return null;
+        }
+
         // New UI: Find scroll container by tracing up from a job card
         if (uiVersion === 'new') {
             const primaryCards = Array.from(document.querySelectorAll('[data-view-name="job-search-job-card"]'));
@@ -1382,11 +1420,13 @@
     async function scrollToRenderAll(scrollContainer) {
         const uiVersion = detectUIVersion();
         const scrollAmount = 600;
-        const maxScrolls = uiVersion === 'new' ? 30 : 20; // More scrolls for new UI
-        const scrollDelay = uiVersion === 'new' ? 400 : 300; // Slower for new UI to let it load
-        
-        const countSelector = uiVersion === 'new' ? 
-            () => getNewUIJobCards().length : 
+        const maxScrolls = (uiVersion === 'new' || uiVersion === 'collections') ? 50 : 20;
+        const scrollDelay = (uiVersion === 'new' || uiVersion === 'collections') ? 400 : 300;
+
+        const countSelector = uiVersion === 'new' ?
+            () => getNewUIJobCards().length :
+            uiVersion === 'collections' ?
+            () => document.querySelectorAll('div[data-job-id]').length :
             () => document.querySelectorAll('li[data-occludable-job-id] .job-card-container').length;
         
         const jobsBefore = countSelector();
@@ -1529,6 +1569,74 @@
         return jobs;
     }
     
+    function extractJobsFromCollectionsUI() {
+        const jobs = [];
+        const seen = new Set();
+        const jobItems = document.querySelectorAll('div[data-job-id]');
+        console.log(`[LinkedIn Scraper] Collections UI: Found ${jobItems.length} job cards`);
+
+        jobItems.forEach((item) => {
+            try {
+                const jobId = item.getAttribute('data-job-id');
+                if (!jobId || seen.has(jobId)) return;
+                seen.add(jobId);
+
+                const titleEl = item.querySelector('a[href*="/jobs/view/"]') ||
+                               item.querySelector('.job-card-list__title--link') ||
+                               item.querySelector('.artdeco-entity-lockup__title a');
+                const title = titleEl ? titleEl.innerText.trim().split('\n')[0] : 'Unknown';
+
+                const companyEl = item.querySelector('.artdeco-entity-lockup__subtitle span') ||
+                                 item.querySelector('.job-card-container__primary-description') ||
+                                 item.querySelector('.artdeco-entity-lockup__subtitle');
+                const company = companyEl ? companyEl.innerText.trim() : 'Unknown';
+
+                const locationEl = item.querySelector('.artdeco-entity-lockup__caption li span') ||
+                                  item.querySelector('.artdeco-entity-lockup__caption span') ||
+                                  item.querySelector('.job-card-container__metadata-item');
+                const location = locationEl ? locationEl.innerText.trim() : 'Unknown';
+
+                const metadataEl = item.querySelector('.artdeco-entity-lockup__metadata li span');
+                const salary = metadataEl ? metadataEl.innerText.trim() : '';
+
+                const linkEl = item.querySelector('a[href*="/jobs/view/"]');
+                let link = linkEl ? linkEl.href : `https://www.linkedin.com/jobs/view/${jobId}/`;
+                if (link.includes('?')) link = link.split('?')[0];
+
+                const isTopApplicant = item.innerText.toLowerCase().includes('top applicant');
+                const hasEasyApply = item.innerText.includes('Easy Apply');
+                const hasConnections = item.innerText.toLowerCase().includes('connection');
+
+                const timeEl = item.querySelector('time');
+                let postedAgo = '';
+                if (timeEl) {
+                    postedAgo = timeEl.innerText.trim() || timeEl.getAttribute('datetime') || '';
+                }
+                const daysAgo = parseRelativeTime(postedAgo);
+                const postedDate = daysAgo >= 0 ?
+                    new Date(Date.now() - daysAgo * 24 * 60 * 60 * 1000).toISOString().split('T')[0] : '';
+
+                if (title !== 'Unknown') {
+                    const job = {
+                        id: jobId, title: title.substring(0, 150), company: company.substring(0, 100),
+                        location: location.substring(0, 100), salary: salary.substring(0, 100),
+                        isTopApplicant, hasEasyApply, hasConnections,
+                        postedAgo, daysAgo, postedDate,
+                        insight: '', footer: '', link,
+                        extractedAt: new Date().toISOString(),
+                        _source: 'linkedin-collections-ui'
+                    };
+                    job.dedupeKey = getDedupeKey(job);
+                    jobs.push(job);
+                }
+            } catch(e) {
+                console.error('[LinkedIn Scraper] Collections UI extraction error:', e);
+            }
+        });
+
+        return jobs;
+    }
+
     // ========================================
     // Voyager Enrichment
     // ========================================
@@ -1728,7 +1836,9 @@
         console.log(`[LinkedIn Scraper] Extracting from ${uiVersion} UI`);
 
         let jobs;
-        if (uiVersion === 'new') {
+        if (uiVersion === 'collections') {
+            jobs = extractJobsFromCollectionsUI();
+        } else if (uiVersion === 'new') {
             jobs = extractJobsFromNewUI();
             // Enrich new-UI fallback jobs with Voyager API data
             enrichWithVoyagerData(jobs);
@@ -1984,17 +2094,19 @@
                 break;
             }
 
-            const nextBtn = findNextPageButton();
-            if (!nextBtn) {
-                console.log('[LinkedIn Scraper] New UI: no next-page button found after current batch');
-                updateStatus(`No next page button (got ${trulyNewTotal}/${minNewJobs} new)`);
+            if (noProgressPages >= 3) {
+                console.log('[LinkedIn Scraper] New UI: no progress across 3 passes, stopping');
+                updateStatus(`No more jobs loading (got ${trulyNewTotal}/${minNewJobs} new)`);
                 break;
             }
 
-            if (noProgressPages >= 2) {
-                console.log('[LinkedIn Scraper] New UI: no progress across pages, stopping');
-                updateStatus(`No progress across pages (got ${trulyNewTotal}/${minNewJobs} new)`);
-                break;
+            const nextBtn = findNextPageButton();
+            if (!nextBtn) {
+                // No pagination button - try scrolling more (infinite scroll pages like Top Applicant)
+                console.log('[LinkedIn Scraper] New UI: no next-page button, attempting additional scroll pass');
+                updateStatus(`No pagination, scrolling for more... (${trulyNewTotal}/${minNewJobs})`);
+                page++;
+                continue;
             }
 
             const beforeHref = location.href;
@@ -2058,16 +2170,27 @@
     
     async function waitForJobCards(maxWaitMs) {
         // After SPA navigation, LinkedIn may still be rendering.
-        // Wait until job cards appear in the DOM, or timeout.
+        // Wait until job cards ACTUALLY EXIST in the DOM, not just UI type detection.
         const start = Date.now();
         const checkInterval = 300;
         while (Date.now() - start < maxWaitMs) {
             const ui = detectUIVersion();
-            if (ui !== 'unknown') {
+            if (ui === 'classic' || ui === 'collections') {
                 console.log(`[LinkedIn Scraper] Job cards detected (${ui}) after ${Date.now() - start}ms`);
                 return ui;
             }
-            updateStatus('Waiting for page to render...');
+            if (ui === 'new') {
+                // Confirm actual job cards exist in DOM, not just URL match
+                const actualCards = getNewUIJobCards();
+                if (actualCards.length > 0) {
+                    console.log(`[LinkedIn Scraper] Job cards detected (new, ${actualCards.length} cards) after ${Date.now() - start}ms`);
+                    return ui;
+                }
+                // URL matched but no cards yet - keep waiting
+                updateStatus('Page detected, waiting for job cards to render...');
+            } else {
+                updateStatus('Waiting for page to render...');
+            }
             await sleep(checkInterval);
         }
         // Final check
@@ -2080,9 +2203,13 @@
         updateStatus(`${t('scrapeAtLeast')} ${minCount}...`);
 
         // Wait for LinkedIn to finish rendering after SPA navigation
+        // Always wait for actual job cards, even if UI type is detected via URL
         let pageInfo = getPageInfo();
-        if (pageInfo.uiVersion === 'unknown') {
-            const detectedUi = await waitForJobCards(5000);
+        const hasActualCards = pageInfo.uiVersion === 'classic' ||
+            pageInfo.uiVersion === 'collections' ||
+            (pageInfo.uiVersion === 'new' && getNewUIJobCards().length > 0);
+        if (!hasActualCards) {
+            const detectedUi = await waitForJobCards(10000);
             pageInfo = getPageInfo();
             if (pageInfo.uiVersion === 'unknown' && detectedUi === 'unknown') {
                 updateStatus('No job cards found. Try refreshing the page.');
@@ -2091,8 +2218,8 @@
             }
         }
 
-        if (pageInfo.uiVersion === 'new') {
-            // New UI: LinkedIn often virtualizes the list (DOM may only hold ~12 cards).
+        if (pageInfo.uiVersion === 'new' || pageInfo.uiVersion === 'collections') {
+            // New UI / Collections: LinkedIn often virtualizes the list or uses infinite scroll.
             // We must collect incrementally while scrolling and then try pagination.
             await scrapeNewUIUntilTarget(minCount);
             return;
