@@ -103,6 +103,12 @@ Fields like `salary`, `insight`, and `postedAgo` are best-effort - they depend o
 
 ## Changelog
 
+### v0.3.5 (2026-11-11)
+- **Fixed job IDs being shared across different jobs** - click-based ID enrichment matched cards by title alone, so several jobs with the same title (e.g. "Data Scientist" at different companies) could all receive the ID of one card. Cards are now matched on title and company, with location as a tie-breaker, and each card is used for at most one job
+- After a click, an ID is accepted only if it differs from the ID already in the URL, so a leftover ID from the previous card is no longer reused
+- Safety net: if one ID still ends up on jobs from different companies, those jobs fall back to having no link instead of a wrong one
+- Panel title and console log now read the version from the `@version` header (they had shown v0.3.2 since that release)
+
 ### v0.3.4 (2026-03-20)
 - **Collections UI support** - added third UI detection path for LinkedIn's "Top Applicant" and recommendation pages (`div[data-job-id]` + `job-card-list__entity-lockup`)
 - Fixed first-scrape returning 0 results on collections pages (race condition: URL pattern matched before DOM rendered)
