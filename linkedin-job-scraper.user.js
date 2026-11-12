@@ -18,7 +18,7 @@
     'use strict';
 
     // Read the version from the @version header so the panel cannot drift again.
-    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '0.3.5';
+    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '?';
     
     // ========================================
     // Internationalization (i18n)
