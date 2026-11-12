@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LinkedIn Job Scraper
 // @namespace    https://linkedin.com/
-// @version      0.3.4
+// @version      0.3.5
 // @description  Scrape LinkedIn jobs with accumulation, deduplication, and multi-language support. Supports both classic and new (Voyager) UI.
 // @author       Eddy Ji
 // @match        *://www.linkedin.com/jobs/*
@@ -1736,6 +1736,87 @@
     // ========================================
     // Click-based ID enrichment for New UI
     // ========================================
+    function currentUrlJobId() {
+        const urlMatch = location.href.match(/currentJobId=(\d+)/);
+        if (urlMatch) return urlMatch[1];
+        const viewMatch = location.href.match(/\/jobs\/view\/(?:[a-zA-Z0-9-]+-)?(\d+)/);
+        return viewMatch ? viewMatch[1] : null;
+    }
+
+    function _normText(s) {
+        return (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    }
+
+    // A card's title line, minus the verification suffix the extractor also strips.
+    function _normTitleLine(s) {
+        return _normText(s)
+            .replace(/\s*\(verified job\)\s*$/, '')
+            .replace(/\s*with verification\s*$/, '')
+            .trim();
+    }
+
+    // Pure matching step (no DOM clicks), so it can be tested offline.
+    // cardEls: elements with .innerText. Returns Map(job -> card), each card used once.
+    // A job matches a card only if one card line equals the title and the card text
+    // contains the company (when the company is known). Location breaks ties.
+    function findCardsForJobs(cardEls, jobsToMatch) {
+        const cardInfo = cardEls.map(el => {
+            const text = el.innerText || '';
+            return {
+                el,
+                lines: new Set(text.split('\n').map(_normTitleLine).filter(Boolean)),
+                text: _normText(text),
+            };
+        });
+        const used = new Set();
+        const out = new Map();
+        for (const job of jobsToMatch) {
+            const title = _normText(job.title);
+            if (!title) continue;
+            const company = _normText(job.company);
+            const hasCompany = company && company !== 'unknown';
+            const loc = _normText(job.location);
+            let best = null, bestScore = -1, tie = false;
+            for (const c of cardInfo) {
+                if (used.has(c)) continue;
+                if (!c.lines.has(title)) continue;
+                if (hasCompany && !c.text.includes(company)) continue;
+                const score = (loc && loc !== 'unknown' && c.text.includes(loc)) ? 1 : 0;
+                if (score > bestScore) { best = c; bestScore = score; tie = false; }
+                else if (score === bestScore) { tie = true; }
+            }
+            // Without a company, a title-only match is safe only if it is unique.
+            if (!best || (!hasCompany && tie)) continue;
+            used.add(best);
+            out.set(job, best.el);
+        }
+        return out;
+    }
+
+    function revertConflictingClickIds(allJobs) {
+        const companiesById = new Map();
+        for (const j of allJobs) {
+            if (!j.id || String(j.id).startsWith('newui-')) continue;
+            const id = String(j.id);
+            if (!companiesById.has(id)) companiesById.set(id, new Set());
+            companiesById.get(id).add(_normText(j.company));
+        }
+        let reverted = 0;
+        for (const j of allJobs) {
+            if (j._source !== 'linkedin-new-ui-click' || !j._newuiId) continue;
+            const set = companiesById.get(String(j.id));
+            if (set && set.size > 1) {
+                j.id = j._newuiId;
+                j.link = '';
+                j._source = 'linkedin-new-ui-fallback';
+                j._idReverted = true;
+                j.dedupeKey = getDedupeKey(j);
+                reverted++;
+            }
+        }
+        return reverted;
+    }
+
     // When new UI cards have no job ID, we click each card to make LinkedIn
     // update the URL with ?currentJobId=NUMERIC_ID, then read it back.
     async function enrichByClicking(jobs) {
@@ -1745,66 +1826,40 @@
         console.log(`[LinkedIn Scraper] Click-enrichment: ${needEnrichment.length} jobs need IDs`);
         updateStatus(`Enriching ${needEnrichment.length} jobs by clicking...`);
 
-        // Find clickable cards in DOM - match by title text
-        const cardElements = getNewUIJobCards();
-        const titleToCard = new Map();
-        for (const card of cardElements) {
-            // Extract visible title from card for matching
-            const titleEl = card.querySelector('p') || card;
-            const lines = (card.innerText || '').split('\n').map(s => s.trim()).filter(Boolean);
-            // First meaningful line is usually the title
-            for (const line of lines) {
-                if (line.length > 3 && line.length < 150 && !/^\$|applicant|Easy Apply|Promoted|ago$/i.test(line)) {
-                    titleToCard.set(line, card);
-                    break;
-                }
-            }
-        }
+        // Find clickable cards in DOM. v0.3.5: match on title AND company (AND location
+        // when it helps), and use each card at most once. v0.3.4 matched on title alone,
+        // so four different "Data Scientist" jobs all clicked the same card and got one ID
+        // (11/11 export: 29 IDs carried 2+ companies, 65 rows).
+        const cards = findCardsForJobs(getNewUIJobCards(), needEnrichment);
 
-        // Save current URL to restore later
-        const originalUrl = location.href;
         let enriched = 0;
 
         for (const job of needEnrichment) {
-            // Find matching card in DOM
-            let card = titleToCard.get(job.title);
-            if (!card) {
-                // Fuzzy: try prefix match
-                for (const [cardTitle, cardEl] of titleToCard) {
-                    if (cardTitle.startsWith(job.title.substring(0, 30)) ||
-                        job.title.startsWith(cardTitle.substring(0, 30))) {
-                        card = cardEl;
-                        break;
-                    }
-                }
-            }
+            const card = cards.get(job);
             if (!card) continue;
 
-            // Click the card
+            // Only accept an ID that CHANGED after the click. v0.3.4 accepted whatever
+            // currentJobId was already in the URL, i.e. possibly the previous card's.
+            const prevId = currentUrlJobId();
+
             try {
                 card.click();
             } catch(e) {
                 continue;
             }
 
-            // Wait for URL to update with currentJobId
             let jobId = null;
-            for (let wait = 0; wait < 6; wait++) {
+            for (let wait = 0; wait < 20; wait++) {
                 await sleep(150);
-                const urlMatch = location.href.match(/currentJobId=(\d+)/);
-                if (urlMatch) {
-                    jobId = urlMatch[1];
-                    break;
-                }
-                // Also check for /jobs/view/ID in the URL
-                const viewMatch = location.href.match(/\/jobs\/view\/(?:[a-zA-Z0-9-]+-)?(\d+)/);
-                if (viewMatch) {
-                    jobId = viewMatch[1];
+                const id = currentUrlJobId();
+                if (id && id !== prevId) {
+                    jobId = id;
                     break;
                 }
             }
 
             if (jobId) {
+                job._newuiId = job.id;
                 job.id = jobId;
                 job.link = 'https://www.linkedin.com/jobs/view/' + jobId + '/';
                 job._source = 'linkedin-new-ui-click';
@@ -1816,6 +1871,15 @@
             if (enriched % 5 === 0 && enriched > 0) {
                 updateStatus(`Enriching... ${enriched}/${needEnrichment.length}`);
             }
+        }
+
+        // Last guard: an ID that landed on two different companies is wrong for at least
+        // one of them, and we cannot tell which. Revert every click-assigned copy to its
+        // newui- placeholder. A missing ID is cheaper downstream than a wrong one.
+        const reverted = revertConflictingClickIds(jobs);
+        if (reverted > 0) {
+            enriched -= reverted;
+            console.warn(`[LinkedIn Scraper] Click-enrichment: reverted ${reverted} IDs that mapped to 2+ companies`);
         }
 
         console.log(`[LinkedIn Scraper] Click-enrichment: ${enriched}/${needEnrichment.length} jobs got IDs`);
