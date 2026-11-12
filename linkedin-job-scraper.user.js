@@ -16,6 +16,9 @@
 
 (function() {
     'use strict';
+
+    // Read the version from the @version header so the panel cannot drift again.
+    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '0.3.5';
     
     // ========================================
     // Internationalization (i18n)
@@ -109,7 +112,7 @@
         return LANG[lang][key] || LANG.en[key] || key;
     }
     
-    console.log('[LinkedIn Scraper v0.3.2] Script loaded!');
+    console.log('[LinkedIn Scraper v' + SCRIPT_VERSION + '] Script loaded!');
 
     // ========================================
     // Voyager API Interceptor
@@ -712,7 +715,7 @@
         // Header row
         const header = createDiv({display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px'});
         const title = document.createElement('strong');
-        title.textContent = '🔍 ' + t('title') + ' v0.3.2';
+        title.textContent = '🔍 ' + t('title') + ' v' + SCRIPT_VERSION;
         title.style.fontSize = '14px';
         
         const headerBtns = createDiv({display: 'flex', gap: '8px', alignItems: 'center'});
